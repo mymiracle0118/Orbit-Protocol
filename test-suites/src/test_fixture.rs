@@ -25,10 +25,8 @@ use crate::dependencies::treasury::{TreasuryClient, TREASURY_WASM};
 use crate::dependencies::bridge_oracle::{BridgeOracleClient, create_bridge_oracle};
 use crate::dependencies::pair_factory::{create_pair_factory, PairFactoryClient};
 use crate::dependencies::router::{create_router, RouterClient};
-use crate::dependencies::treasury_factory::{FactoryAsset, create_treasury_factory, TreasuryFactoryClient, TreasuryInitMeta};
 use crate::dependencies::mock_treasury::{create_mock_treasury, MockTreasuryClient};
 use crate::dependencies::mock_pegkeeper::{create_mock_pegkeeper, MockPegkeeperClient};
-use crate::dependencies::mock_receiver::{create_mock_receiver, MockReceiverClient};
 
 pub const SCALAR_7: i128 = 1_000_0000;
 pub const SCALAR_9: i128 = 1_000_000_000;
@@ -36,12 +34,14 @@ pub const SCALAR_9: i128 = 1_000_000_000;
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum TokenIndex {
     BLND = 0,
-    XLM = 1,
-    MockOusd = 2
+    USDC = 1,
+    WETH = 2,
+    XLM = 3,
+    STABLE = 4,
+    OUSD = 5,
 }
 
 pub struct PoolFixture<'a> {
-    pub treasury: TreasuryClient<'a>,
     pub pool: PoolClient<'a>,
     pub reserves: HashMap<TokenIndex, u32>,
 }
@@ -66,18 +66,15 @@ pub struct TestFixture<'a> {
     pub backstop: BackstopClient<'a>,
     pub pool_factory: PoolFactoryClient<'a>,
     pub oracle: MockPriceOracleClient<'a>,
-    pub treasury_factory: TreasuryFactoryClient<'a>,
-    pub pair_factory: PairFactoryClient<'a>,
-    pub router: RouterClient<'a>,
-    
-    pub bridge_oracle: BridgeOracleClient<'a>,
     pub lp: LPClient<'a>,
     pub pools: Vec<PoolFixture<'a>>,
-    pub pairs: Vec<PairFixture<'a>>,
     pub tokens: Vec<MockTokenClient<'a>>,
+    pub pair_factory: PairFactoryClient<'a>,
+    pub pairs: Vec<PairFixture<'a>>,   
+    pub router: RouterClient<'a>,
+    pub bridge_oracle: BridgeOracleClient<'a>,          
     pub mock_treasury: MockTreasuryClient<'a>,
     pub mock_pegkeeper: MockPegkeeperClient<'a>,
-    pub mock_receiver: MockReceiverClient<'a>
 }
 
 impl TestFixture<'_> {
@@ -87,12 +84,12 @@ impl TestFixture<'_> {
     /// Blend Protocol dependencies, including a BLND-USDC LP.
     
     pub fn create<'a>() -> TestFixture<'a> {
-
-        std::println!("===================================== Fixture Create in Text Fixture ===========================================");
-
         let e = Env::default();
         e.mock_all_auths();
         e.budget().reset_unlimited();
+
+        let admin = Address::generate(&e);
+        let frodo = Address::generate(&e);
 
         e.ledger().set(LedgerInfo {
             timestamp: 1441065600, // Sept 1st, 2015 (backstop epoch)
@@ -105,40 +102,30 @@ impl TestFixture<'_> {
             max_entry_ttl: 9999999,
         });
 
-        let admin = Address::generate(&e);
-        let frodo = Address::generate(&e);
-
-        let (mock_treasury_id, mock_treasury_client) = create_mock_treasury(&e);
-        let (mock_pegkeeper_id, mock_pegkeeper_client) = create_mock_pegkeeper(&e);
-        let (mock_receiver_id, mock_receiver_client) = create_mock_receiver(&e);
-
         let (blnd_id, blnd_client) = create_stellar_token(&e, &admin);
-        let (mock_ousd_token_id, mock_ousd_token_client) = create_stellar_token(&e, &mock_treasury_id);
+        let (eth_id, eth_client) = create_token(&e, &admin, 9, "wETH");
+        let (usdc_id, usdc_client) = create_stellar_token(&e, &admin);
         let (xlm_id, xlm_client) = create_stellar_token(&e, &admin);
+        let (stable_id, stable_client) = create_token(&e, &admin, 6, "STABLE");
+        let (ousd_id, ousd_client) = create_token(&e, &admin, 6, "OUSD");
 
         // deploy Blend Protocol dependencies
         let (backstop_id, backstop_client) = create_backstop(&e);
         let (emitter_id, emitter_client) = create_emitter(&e);
         let (pool_factory_id, _) = create_pool_factory(&e);
 
-        std::println!("===================================== After Create With Backstop, Emitter, Pool Factory ===========================================");
-
         // deploy external dependencies
-        let (lp, lp_client) = create_lp_pool(&e, &admin, &blnd_id, &mock_ousd_token_id.clone());
-
-        std::println!("===================================== After Create Lp ===========================================");
+        let (lp, lp_client) = create_lp_pool(&e, &admin, &blnd_id, &usdc_id.clone());
         // initialize emitter
         // blnd_client.mint(&emitter_id, &(10_000_000 * SCALAR_7));
         blnd_client.set_admin(&emitter_id);
         emitter_client.initialize(&blnd_id, &backstop_id, &lp);
 
-        std::println!("===================================== After Emitter Initialize ===========================================");
-
         // initialize backstop
         backstop_client.initialize(
             &lp,
             &emitter_id,
-            &mock_ousd_token_id.clone(),
+            &usdc_id,
             &blnd_id,                        
             &pool_factory_id,
             &svec![
@@ -147,8 +134,6 @@ impl TestFixture<'_> {
                 (frodo.clone(), 40_000_000 * SCALAR_7)
             ],
         );
-
-        std::println!("===================================== After Backstop Initialize ===========================================");
 
         // initialize pool factory
         let pool_hash = e.deployer().upload_contract_wasm(POOL_WASM);
@@ -160,55 +145,41 @@ impl TestFixture<'_> {
         let pool_factory_client = PoolFactoryClient::new(&e, &pool_factory_id);
         pool_factory_client.initialize(&pool_init_meta);
 
-        std::println!("===================================== After Pool Factory Initialize Initialize ===========================================");
-
         // drop tokens to bombadil
         backstop_client.drop();
 
-        std::println!("===================================== After Backstop Drop Function ===========================================");
-
         let (_, mock_oracle_client) = create_mock_oracle(&e);
-
-        std::println!("===================================== After Create Mock Oracle ===========================================");
 
         mock_oracle_client.set_data(
             &admin,
             &Asset::Other(Symbol::new(&e, "USD")),
             &svec![
                 &e,
-                Asset::Stellar(mock_ousd_token_id.clone()),
-                Asset::Stellar(xlm_id.clone())
+                Asset::Stellar(eth_id.clone()),
+                Asset::Stellar(usdc_id),
+                Asset::Stellar(xlm_id.clone()),
+                Asset::Stellar(stable_id.clone()),
+                Asset::Stellar(ousd_id.clone())
             ],
             &7,
             &300,
         );
 
-        std::println!("===================================== After Oracle Set Data ===========================================");
-
         mock_oracle_client.set_price_stable(&svec![
             &e,
-            1_0000000, // mock_ousd
+            2000_0000000, // eth
+            1_0000000,    // usdc
             0_1000000,    // xlm
+            1_0000000,    // stable
+            1_0000000,    // ousd
         ]);
 
-        std::println!("===================================== After Oracle Set Price ===========================================");
+        let (mock_treasury_id, mock_treasury_client) = create_mock_treasury(&e);
+        let (mock_pegkeeper_id, mock_pegkeeper_client) = create_mock_pegkeeper(&e);
 
         // deploy Orbit dependencies
-        let (treasury_factory_id, treasury_factory_client) = create_treasury_factory(&e);
         let (bridge_oracle_id, bridge_oracle_client) = create_bridge_oracle(&e);
-        bridge_oracle_client.initialize(&treasury_factory_id, &bridge_oracle_id);
-
-        std::println!("===================================== After Init Treasury, Pegkeeper, Receiver ===========================================");
-        
-        // // initialize treasury factory
-        // let treasury_hash = e.deployer().upload_contract_wasm(MOCK_TREASURY_WASM);
-        // let treasury_init_meta: TreasuryInitMeta = TreasuryInitMeta {
-        //     treasury_hash: treasury_hash.clone(),
-        //     pool_factory: pool_factory_id.clone(),
-        // };
-        // treasury_factory_client.initialize(&admin, &bridge_oracle_id, &treasury_init_meta);
-
-        // std::println!("===================================== After Treasury Init ===========================================");
+        bridge_oracle_client.initialize(&mock_treasury_id, &bridge_oracle_id);
 
         // Initialize soroswap
 
@@ -218,28 +189,20 @@ impl TestFixture<'_> {
         pair_factory_client.initialize(&admin, &pair_hash);
         router_client.initialize(&pair_factory_id);
 
-        std::println!("===================================== Router Init ===========================================");
-
         // initialize oracle
-        mock_treasury_client.initialize(&admin, &mock_ousd_token_id, &blnd_id, &router_id, &mock_ousd_token_id, &mock_pegkeeper_id);
+        mock_treasury_client.initialize(&admin, &ousd_id, &blnd_id, &router_id, &ousd_id, &mock_pegkeeper_id);
 
-        std::println!("===================================== After Mock Treasury Initialize ===========================================");
+        ousd_client.set_admin(&mock_treasury_id);
 
-        mock_pegkeeper_client.initialize(&admin, &0_u64);
-        mock_pegkeeper_client.add_treasury(&mock_ousd_token_id, &mock_treasury_id);
-        mock_pegkeeper_client.set_receiver(&mock_receiver_id);
-        mock_receiver_client.initialize(&mock_pegkeeper_id);
-
-        std::println!("===================================== After Init Treasury, Pegkeeper, Receiver ===========================================");
+        mock_pegkeeper_client.initialize(&admin);
 
         let fixture = TestFixture {
             env: e,
-            admin: admin,
+            admin,
             users: vec![frodo],
             emitter: emitter_client,
             backstop: backstop_client,
             pool_factory: pool_factory_client,
-            treasury_factory: treasury_factory_client,
             pair_factory: pair_factory_client,
             router: router_client,
             oracle: mock_oracle_client,
@@ -249,64 +212,31 @@ impl TestFixture<'_> {
             pairs: vec![],
             tokens: vec![
                 blnd_client,
+                usdc_client,
+                eth_client,
                 xlm_client,
-                mock_ousd_token_client
+                stable_client,
+                ousd_client
             ],
             mock_treasury: mock_treasury_client,
             mock_pegkeeper: mock_pegkeeper_client,
-            mock_receiver: mock_receiver_client
         };
         fixture.jump(7 * 24 * 60 * 60);
         fixture
     }
 
     pub fn create_pool(&mut self, name: String, backstop_take_rate: u32, max_positions: u32) {
-        std::println!("===================================== Create Pool Function ===========================================");
-        // let from = self.tokens[TokenIndex::MockOusd].address.clone();
-        // let to = self.tokens[TokenIndex::BLND].address.clone();
-        let oracle_id = &self.bridge_oracle;
-        
-        std::println!("===================================== Create Pool Before ===========================================");
-
         let pool_id = self.pool_factory.deploy(
             &self.admin,
             &name,
             &BytesN::<32>::random(&self.env),
-            &oracle_id.address.clone(),
+            &self.oracle.address,
             &backstop_take_rate,
             &max_positions,
         );
-
-        std::println!("===================================== Create Pool After ===========================================");
-
-        let ousd_id = &self.tokens[TokenIndex::MockOusd];
-        let mock_treasury_client = &self.mock_treasury;
-
-        // let treasury_id = self.treasury_factory.deploy(
-        //     &BytesN::<32>::random(&self.env),
-        //     &from,
-        //     &FactoryAsset::Stellar(to.clone()),
-        //     &pool_id
-        // );
-
-        // std::println!("===================================== Treasury Factory Deploy After ===========================================");
-
-        ousd_id.set_admin(&mock_treasury_client.address);
         self.pools.push(PoolFixture {
             pool: PoolClient::new(&self.env, &pool_id),
-            treasury: TreasuryClient::new(&self.env, &mock_treasury_client.address),
             reserves: HashMap::new(),
-        });
-
-        std::println!("===================================== Push Pool to Buffer ===========================================");
-    }
-
-    pub fn create_pair(&mut self, token_a: TokenIndex, token_b: TokenIndex) {
-        let token_a_id = &self.tokens[token_a].address;
-        let token_b_id = &self.tokens[token_b].address;
-        let pair_id = self.pair_factory.create_pair(token_a_id, token_b_id);
-        self.pairs.push(PairFixture {
-            pair: PairClient::new(&self.env, &pair_id),
         });
     }
 
@@ -316,26 +246,21 @@ impl TestFixture<'_> {
         asset_index: TokenIndex,
         reserve_config: &ReserveConfig,
     ) {
-        std::println!("===================================== create_pool_reserve function ===========================================");
         let mut pool_fixture = self.pools.remove(pool_index);
-        std::println!("===================================== remove pool index ===========================================");
         let token = &self.tokens[asset_index];
         pool_fixture
             .pool
             .queue_set_reserve(&token.address, reserve_config);
-        std::println!("===================================== que set reserve ===========================================");
         let index = pool_fixture.pool.set_reserve(&token.address);
         pool_fixture.reserves.insert(asset_index, index);
-        std::println!("===================================== insert reserve asset ===========================================");
         self.pools.insert(pool_index, pool_fixture);
-        std::println!("===================================== insert pool index, pool fixture ===========================================");
     }
 
     /********** Contract Data Helpers **********/
 
     pub fn read_pool_config(&self, pool_index: usize) -> PoolConfig {
-        let treasury_fixture = &self.pools[pool_index];
-        self.env.as_contract(&treasury_fixture.pool.address, || {
+        let pool_fixture = &self.pools[pool_index];
+        self.env.as_contract(&pool_fixture.pool.address, || {
             self.env
                 .storage()
                 .instance()
@@ -345,8 +270,8 @@ impl TestFixture<'_> {
     }
 
     pub fn read_pool_emissions(&self, pool_index: usize) -> Map<u32, u64> {
-        let treasury_fixture = &self.pools[pool_index];
-        self.env.as_contract(&treasury_fixture.pool.address, || {
+        let pool_fixture = &self.pools[pool_index];
+        self.env.as_contract(&pool_fixture.pool.address, || {
             self.env
                 .storage()
                 .persistent()
@@ -356,9 +281,9 @@ impl TestFixture<'_> {
     }
 
     pub fn read_reserve_config(&self, pool_index: usize, asset_index: TokenIndex) -> ReserveConfig {
-        let treasury_fixture = &self.pools[pool_index];
+        let pool_fixture = &self.pools[pool_index];
         let token = &self.tokens[asset_index];
-        self.env.as_contract(&treasury_fixture.pool.address, || {
+        self.env.as_contract(&pool_fixture.pool.address, || {
             let token_id = &token.address;
             self.env
                 .storage()
@@ -369,9 +294,9 @@ impl TestFixture<'_> {
     }
 
     pub fn read_reserve_data(&self, pool_index: usize, asset_index: TokenIndex) -> ReserveData {
-        let treasury_fixture = &self.pools[pool_index];
+        let pool_fixture = &self.pools[pool_index];
         let token = &self.tokens[asset_index];
-        self.env.as_contract(&treasury_fixture.pool.address, || {
+        self.env.as_contract(&pool_fixture.pool.address, || {
             let token_id = &token.address;
             self.env
                 .storage()
@@ -387,10 +312,10 @@ impl TestFixture<'_> {
         asset_index: TokenIndex,
         token_type: u32,
     ) -> (ReserveEmissionsConfig, ReserveEmissionsData) {
-        let treasury_fixture = &self.pools[pool_index];
-        let reserve_index = treasury_fixture.reserves.get(&asset_index).unwrap();
+        let pool_fixture = &self.pools[pool_index];
+        let reserve_index = pool_fixture.reserves.get(&asset_index).unwrap();
         let res_emis_index = reserve_index * 2 + token_type;
-        self.env.as_contract(&treasury_fixture.pool.address, || {
+        self.env.as_contract(&pool_fixture.pool.address, || {
             let emis_config = self
                 .env
                 .storage()
